@@ -1,0 +1,6 @@
+#!/bin/bash
+set -euo pipefail
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+"$ROOT/tests/test-controller.sh"
+node "$ROOT/tests/test-model.mjs"
+"$ROOT/tests/test-package.sh"

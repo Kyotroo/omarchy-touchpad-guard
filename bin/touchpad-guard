@@ -1,0 +1,439 @@
+#!/bin/bash
+set -euo pipefail
+
+SCHEMA_VERSION=1
+MAX_STATE_BYTES=65536
+STATE_DIR=${TOUCHPAD_GUARD_STATE_DIR:-"$HOME/.local/state/omarchy/kdm-touchpad-guard"}
+SETTINGS_FILE="$STATE_DIR/settings.json"
+SESSION_FILE="$STATE_DIR/session.json"
+SESSION_SIGNATURE=${HYPRLAND_INSTANCE_SIGNATURE:-unknown}
+TOGGLE_MARKER=${TOUCHPAD_GUARD_TOGGLE_MARKER:-"$HOME/.local/state/omarchy/toggles/hypr/touchpad-disabled-name"}
+
+die_json() {
+  local message=$1
+  jq -cn --arg error "$message" '{schemaVersion:1,ok:false,mode:"normal",devices:[],settings:{},effective:{},warnings:[],error:$error}'
+  exit 1
+}
+
+ensure_state_dir() {
+  if [[ -L $STATE_DIR || ( -e $STATE_DIR && ! -d $STATE_DIR ) ]]; then
+    die_json "unsafe state directory"
+  fi
+  install -d -m 700 -- "$STATE_DIR"
+  [[ $(stat -c '%u' -- "$STATE_DIR") == "$EUID" ]] || die_json "state directory is not owned by the current user"
+  chmod 700 -- "$STATE_DIR"
+}
+
+file_is_safe() {
+  local path=$1
+  [[ -f $path && ! -L $path ]] || return 1
+  [[ $(stat -c '%u' -- "$path") == "$EUID" ]] || return 1
+  (( $(stat -c '%s' -- "$path") <= MAX_STATE_BYTES ))
+}
+
+settings_filter='. as $root
+  | .schemaVersion == 1
+  and (.normal | type == "object")
+  and (.normal.sensitivity | type == "number" and . >= -1 and . <= 1)
+  and (.normal.scrollFactor | type == "number" and . >= 0 and . <= 2)
+  and (.normal.naturalScroll | type == "boolean")
+  and (.normal.tapToClick | type == "boolean")
+  and (.normal.tapAndDrag | type == "boolean")
+  and (.normal.clickfingerBehavior | type == "boolean")
+  and (.normal.tapButtonMap == "lrm" or .normal.tapButtonMap == "lmr")
+  and (.normal.middleButtonEmulation | type == "boolean")
+  and ([0,1,2] | index($root.normal.dragLock) != null)
+  and ([0,1,2] | index($root.normal.drag3fg) != null)
+  and (.normal.disableWhileTyping | type == "boolean")
+  and ([0,1,2,3] | index($root.normal.followMouse) != null)
+  and (.protectKeyboardFocus | type == "boolean")'
+
+session_filter='. as $root
+  | .schemaVersion == 1
+  and (.hyprlandSignature | type == "string")
+  and (["normal","safe","off"] | index($root.mode) != null)'
+
+read_safe_json() {
+  local path=$1 filter=$2
+  file_is_safe "$path" || return 1
+  jq -ce "$filter" "$path" >/dev/null 2>&1 || return 1
+  jq -c . "$path"
+}
+
+quarantine_if_present() {
+  local path=$1
+  [[ -e $path || -L $path ]] || return 0
+  local stamp target
+  stamp=$(date -u +%Y%m%dT%H%M%S)
+  target="$path.invalid-$stamp"
+  while [[ -e $target || -L $target ]]; do
+    target="$target-$RANDOM"
+  done
+  mv -T -- "$path" "$target"
+}
+
+atomic_write() {
+  local path=$1 json=$2 tmp
+  tmp=$(mktemp --tmpdir="$STATE_DIR" ".$(basename -- "$path").tmp.XXXXXX")
+  chmod 600 -- "$tmp"
+  if ! jq -c . <<<"$json" >"$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  mv -fT -- "$tmp" "$path"
+}
+
+read_devices_json() {
+  local raw
+  raw=$(hyprctl -j devices 2>/dev/null) || return 1
+  jq -ce '.mice | arrays' <<<"$raw" >/dev/null 2>&1 || return 1
+  printf '%s\n' "$raw"
+}
+
+touchpads_from_devices() {
+  local devices=$1
+  jq -c '[.mice[]?
+    | select(.name | type == "string")
+    | select((.name | length) <= 512)
+    | select(.name | test("[[:cntrl:]]") | not)
+    | select(.name | test("touchpad|trackpad"; "i"))
+    | {name:.name,sensitivity:(.defaultSpeed // 0)}]' <<<"$devices"
+}
+
+option_value() {
+  local key=$1 field=$2 fallback=$3 raw value
+  if raw=$(hyprctl -j getoption "$key" 2>/dev/null) && jq -e . >/dev/null 2>&1 <<<"$raw"; then
+    value=$(jq -r --arg field "$field" '.[$field] // empty' <<<"$raw")
+    if [[ -n $value ]]; then
+      printf '%s\n' "$value"
+      return 0
+    fi
+  fi
+  printf '%s\n' "$fallback"
+}
+
+import_settings() {
+  local devices=$1 touchpads sensitivity
+  local natural_scroll scroll_factor tap_to_click tap_and_drag clickfinger
+  local tap_map middle drag_lock drag_3fg disable_typing follow_mouse
+
+  touchpads=$(touchpads_from_devices "$devices") || return 1
+  sensitivity=$(jq -r '.[0].sensitivity // 0' <<<"$touchpads")
+  sensitivity=$(coerce_setting sensitivity "$sensitivity") || sensitivity=0
+  natural_scroll=$(option_value input:touchpad:natural_scroll bool false)
+  scroll_factor=$(option_value input:touchpad:scroll_factor float 1)
+  scroll_factor=$(coerce_setting scrollFactor "$scroll_factor") || scroll_factor=1
+  tap_to_click=$(option_value input:touchpad:tap-to-click bool true)
+  tap_and_drag=$(option_value input:touchpad:tap-and-drag bool true)
+  clickfinger=$(option_value input:touchpad:clickfinger_behavior bool false)
+  tap_map=$(option_value input:touchpad:tap_button_map str lrm)
+  [[ $tap_map == lrm || $tap_map == lmr ]] || tap_map=lrm
+  middle=$(option_value input:touchpad:middle_button_emulation bool false)
+  drag_lock=$(option_value input:touchpad:drag_lock int 0)
+  [[ $drag_lock =~ ^[012]$ ]] || drag_lock=0
+  drag_3fg=$(option_value input:touchpad:drag_3fg int 0)
+  [[ $drag_3fg =~ ^[012]$ ]] || drag_3fg=0
+  disable_typing=$(option_value input:touchpad:disable_while_typing bool true)
+  follow_mouse=$(option_value input:follow_mouse int 1)
+  [[ $follow_mouse =~ ^[0-3]$ ]] || follow_mouse=1
+
+  jq -cn \
+    --argjson schema "$SCHEMA_VERSION" \
+    --argjson sensitivity "$sensitivity" \
+    --argjson scrollFactor "$scroll_factor" \
+    --argjson naturalScroll "$natural_scroll" \
+    --argjson tapToClick "$tap_to_click" \
+    --argjson tapAndDrag "$tap_and_drag" \
+    --argjson clickfingerBehavior "$clickfinger" \
+    --arg tapButtonMap "$tap_map" \
+    --argjson middleButtonEmulation "$middle" \
+    --argjson dragLock "$drag_lock" \
+    --argjson drag3fg "$drag_3fg" \
+    --argjson disableWhileTyping "$disable_typing" \
+    --argjson followMouse "$follow_mouse" \
+    '{schemaVersion:$schema,normal:{sensitivity:$sensitivity,scrollFactor:$scrollFactor,naturalScroll:$naturalScroll,tapToClick:$tapToClick,tapAndDrag:$tapAndDrag,clickfingerBehavior:$clickfingerBehavior,tapButtonMap:$tapButtonMap,middleButtonEmulation:$middleButtonEmulation,dragLock:$dragLock,drag3fg:$drag3fg,disableWhileTyping:$disableWhileTyping,followMouse:$followMouse},protectKeyboardFocus:true}'
+}
+
+effective_settings() {
+  local settings=$1 mode=$2
+  case $mode in
+    safe)
+      jq -c '.normal + {tapToClick:false,tapAndDrag:false,followMouse:(if .protectKeyboardFocus then 0 else .normal.followMouse end)}' <<<"$settings"
+      ;;
+    *) jq -c '.normal' <<<"$settings" ;;
+  esac
+}
+
+lua_string() {
+  local value=$1
+  value=${value//\\/\\\\}
+  value=${value//\"/\\\"}
+  printf '"%s"' "$value"
+}
+
+apply_device_state() {
+  local touchpads=$1 enabled=$2 sensitivity=$3 name quoted
+  while IFS= read -r name; do
+    [[ -n $name ]] || continue
+    quoted=$(lua_string "$name")
+    hyprctl eval "hl.device({ name = $quoted, enabled = $enabled, sensitivity = $sensitivity })" >/dev/null || return 1
+  done < <(jq -r '.[].name' <<<"$touchpads")
+}
+
+apply_global_settings() {
+  local effective=$1 lua
+  lua=$(jq -r '
+    "hl.config({ input = { follow_mouse = " + (.followMouse|tostring)
+    + ", touchpad = { natural_scroll = " + (.naturalScroll|tostring)
+    + ", scroll_factor = " + (.scrollFactor|tostring)
+    + ", tap_to_click = " + (.tapToClick|tostring)
+    + ", tap_and_drag = " + (.tapAndDrag|tostring)
+    + ", clickfinger_behavior = " + (.clickfingerBehavior|tostring)
+    + ", tap_button_map = \"" + .tapButtonMap + "\""
+    + ", middle_button_emulation = " + (.middleButtonEmulation|tostring)
+    + ", drag_lock = " + (.dragLock|tostring)
+    + ", drag_3fg = " + (.drag3fg|tostring)
+    + ", disable_while_typing = " + (.disableWhileTyping|tostring)
+    + " } } })"' <<<"$effective") || return 1
+  hyprctl eval "$lua" >/dev/null
+}
+
+show_mode_osd() {
+  local mode=$1
+  case $mode in
+    normal) omarchy-osd -i touchpad -m "Touchpad: Normal" >/dev/null 2>&1 || true ;;
+    safe) omarchy-osd -i touchpad -m "Touchpad: Typing Safe" >/dev/null 2>&1 || true ;;
+  esac
+}
+
+apply_mode() {
+  local target=$1 settings=$2 devices=$3 previous=$4 notify=${5:-false}
+  local touchpads count effective sensitivity marker_was_present=false
+  touchpads=$(touchpads_from_devices "$devices") || return 1
+  count=$(jq 'length' <<<"$touchpads")
+  (( count > 0 )) || return 0
+
+  [[ -e $TOGGLE_MARKER || -L $TOGGLE_MARKER ]] && marker_was_present=true
+
+  if [[ $target == off ]]; then
+    if [[ $marker_was_present != true ]]; then
+      omarchy-toggle-touchpad off >/dev/null || return 1
+    fi
+    sensitivity=$(jq -r '.normal.sensitivity' <<<"$settings")
+    apply_device_state "$touchpads" false "$sensitivity" || return 1
+    return 0
+  fi
+
+  if [[ $marker_was_present == true || $previous == off ]]; then
+    omarchy-toggle-touchpad on >/dev/null || return 1
+  fi
+
+  effective=$(effective_settings "$settings" "$target") || return 1
+  apply_global_settings "$effective" || return 1
+  sensitivity=$(jq -r '.sensitivity' <<<"$effective")
+  apply_device_state "$touchpads" true "$sensitivity" || return 1
+
+  if [[ $notify == true ]]; then
+    if [[ $target == safe || ( $target == normal && $marker_was_present != true && $previous != off ) ]]; then
+      show_mode_osd "$target"
+    fi
+  fi
+}
+
+write_session_mode() {
+  local mode=$1 session
+  session=$(jq -cn \
+    --argjson schema "$SCHEMA_VERSION" \
+    --arg signature "$SESSION_SIGNATURE" \
+    --arg mode "$mode" \
+    '{schemaVersion:$schema,hyprlandSignature:$signature,mode:$mode}')
+  atomic_write "$SESSION_FILE" "$session"
+}
+
+load_current_state() {
+  CURRENT_DEVICES=$(read_devices_json) || return 1
+  CURRENT_SETTINGS=$(read_safe_json "$SETTINGS_FILE" "$settings_filter") || return 1
+  local session
+  session=$(read_safe_json "$SESSION_FILE" "$session_filter") || return 1
+  if [[ $(jq -r '.hyprlandSignature' <<<"$session") != "$SESSION_SIGNATURE" ]]; then
+    return 1
+  fi
+  CURRENT_MODE=$(jq -r '.mode' <<<"$session")
+}
+
+resolve_status_data() {
+  local devices=$1 settings session mode=normal touchpads warnings='[]' effective
+  if ! settings=$(read_safe_json "$SETTINGS_FILE" "$settings_filter"); then
+    settings=$(import_settings "$devices") || return 1
+  fi
+  if session=$(read_safe_json "$SESSION_FILE" "$session_filter") &&
+      [[ $(jq -r '.hyprlandSignature' <<<"$session") == "$SESSION_SIGNATURE" ]]; then
+    mode=$(jq -r '.mode' <<<"$session")
+  fi
+  touchpads=$(touchpads_from_devices "$devices") || return 1
+  if [[ $(jq 'length' <<<"$touchpads") -eq 0 ]]; then
+    warnings='["no_touchpad"]'
+  fi
+  effective=$(effective_settings "$settings" "$mode") || return 1
+  jq -cn \
+    --argjson schema "$SCHEMA_VERSION" \
+    --arg mode "$mode" \
+    --argjson devices "$(jq -c '[.[].name]' <<<"$touchpads")" \
+    --argjson settings "$settings" \
+    --argjson effective "$effective" \
+    --argjson warnings "$warnings" \
+    '{schemaVersion:$schema,ok:true,mode:$mode,devices:$devices,settings:$settings,effective:$effective,warnings:$warnings,error:""}'
+}
+
+command_status() {
+  local devices
+  devices=$(read_devices_json) || die_json "unable to read Hyprland devices"
+  resolve_status_data "$devices" || die_json "unable to read touchpad settings"
+}
+
+command_initialize() {
+  ensure_state_dir
+  exec 9<"$STATE_DIR"
+  flock -x 9
+
+  local devices settings session mode=normal
+  devices=$(read_devices_json) || die_json "unable to read Hyprland devices"
+
+  if ! settings=$(read_safe_json "$SETTINGS_FILE" "$settings_filter"); then
+    quarantine_if_present "$SETTINGS_FILE"
+    settings=$(import_settings "$devices") || die_json "unable to import touchpad settings"
+    atomic_write "$SETTINGS_FILE" "$settings" || die_json "unable to save touchpad settings"
+  fi
+
+  if session=$(read_safe_json "$SESSION_FILE" "$session_filter") &&
+      [[ $(jq -r '.hyprlandSignature' <<<"$session") == "$SESSION_SIGNATURE" ]]; then
+    mode=$(jq -r '.mode' <<<"$session")
+  else
+    quarantine_if_present "$SESSION_FILE"
+  fi
+
+  session=$(jq -cn \
+    --argjson schema "$SCHEMA_VERSION" \
+    --arg signature "$SESSION_SIGNATURE" \
+    --arg mode "$mode" \
+    '{schemaVersion:$schema,hyprlandSignature:$signature,mode:$mode}')
+  atomic_write "$SESSION_FILE" "$session" || die_json "unable to save touchpad session"
+  apply_mode "$mode" "$settings" "$devices" "$mode" false || die_json "unable to apply initialized touchpad state"
+  resolve_status_data "$devices" || die_json "unable to read initialized state"
+}
+
+transition_to() {
+  local target=$1 previous rollback_mode error
+  command_initialize >/dev/null
+  load_current_state || die_json "unable to load initialized touchpad state"
+  previous=$CURRENT_MODE
+
+  if ! apply_mode "$target" "$CURRENT_SETTINGS" "$CURRENT_DEVICES" "$previous" true; then
+    rollback_mode=$previous
+    [[ $target == safe ]] && rollback_mode=normal
+    if apply_mode "$rollback_mode" "$CURRENT_SETTINGS" "$CURRENT_DEVICES" "$previous" false; then
+      write_session_mode "$rollback_mode" || true
+      error="unable to apply $target mode; restored $rollback_mode"
+    else
+      rollback_mode=$previous
+      error="unable to apply $target mode; rollback also failed"
+    fi
+    jq -cn --arg error "$error" \
+      --arg mode "$rollback_mode" \
+      --argjson settings "$CURRENT_SETTINGS" \
+      --argjson effective "$(effective_settings "$CURRENT_SETTINGS" "$rollback_mode")" \
+      --argjson devices "$(touchpads_from_devices "$CURRENT_DEVICES" | jq -c '[.[].name]')" \
+      '{schemaVersion:1,ok:false,mode:$mode,devices:$devices,settings:$settings,effective:$effective,warnings:[],error:$error}'
+    return 1
+  fi
+
+  write_session_mode "$target" || die_json "unable to save touchpad mode"
+  resolve_status_data "$CURRENT_DEVICES" || die_json "unable to read applied touchpad state"
+}
+
+command_mode() {
+  local target=${1:-}
+  [[ $target == normal || $target == safe || $target == off ]] || die_json "mode must be normal, safe, or off"
+  transition_to "$target"
+}
+
+command_cycle() {
+  command_initialize >/dev/null
+  load_current_state || die_json "unable to load initialized touchpad state"
+  case $CURRENT_MODE in
+    normal) transition_to safe ;;
+    safe) transition_to off ;;
+    off) transition_to normal ;;
+  esac
+}
+
+coerce_setting() {
+  local key=$1 value=$2
+  case $key in
+    sensitivity)
+      jq -cn --arg value "$value" '$value|tonumber|if . < -1 then -1 elif . > 1 then 1 else . end' 2>/dev/null
+      ;;
+    scrollFactor)
+      jq -cn --arg value "$value" '$value|tonumber|if . < 0 then 0 elif . > 2 then 2 else . end' 2>/dev/null
+      ;;
+    naturalScroll|tapToClick|tapAndDrag|clickfingerBehavior|middleButtonEmulation|disableWhileTyping|protectKeyboardFocus)
+      [[ $value == true || $value == false ]] || return 1
+      printf '%s\n' "$value"
+      ;;
+    tapButtonMap)
+      [[ $value == lrm || $value == lmr ]] || return 1
+      jq -cn --arg value "$value" '$value'
+      ;;
+    dragLock|drag3fg)
+      [[ $value =~ ^[012]$ ]] || return 1
+      printf '%s\n' "$value"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+command_set() {
+  local key=${1:-} raw=${2:-} value next path
+  [[ $# -eq 2 ]] || die_json "set requires a setting and value"
+  value=$(coerce_setting "$key" "$raw") || die_json "invalid setting or value"
+  command_initialize >/dev/null
+  load_current_state || die_json "unable to load initialized touchpad state"
+
+  if [[ $key == protectKeyboardFocus ]]; then
+    path='.protectKeyboardFocus = $value'
+  else
+    path=".normal.$key = \$value"
+  fi
+  next=$(jq -c --argjson value "$value" "$path" <<<"$CURRENT_SETTINGS") || die_json "unable to update touchpad setting"
+  jq -e "$settings_filter" <<<"$next" >/dev/null 2>&1 || die_json "updated setting failed validation"
+
+  if ! apply_mode "$CURRENT_MODE" "$next" "$CURRENT_DEVICES" "$CURRENT_MODE" false; then
+    apply_mode "$CURRENT_MODE" "$CURRENT_SETTINGS" "$CURRENT_DEVICES" "$CURRENT_MODE" false || true
+    die_json "unable to apply touchpad setting"
+  fi
+  atomic_write "$SETTINGS_FILE" "$next" || die_json "unable to save touchpad setting"
+  resolve_status_data "$CURRENT_DEVICES" || die_json "unable to read updated touchpad state"
+}
+
+command_reset() {
+  command_initialize >/dev/null
+  hyprctl reload >/dev/null || die_json "unable to reload Hyprland"
+  local devices settings
+  devices=$(read_devices_json) || die_json "unable to read Hyprland devices after reload"
+  settings=$(import_settings "$devices") || die_json "unable to import reloaded touchpad settings"
+  apply_mode normal "$settings" "$devices" normal false || die_json "unable to apply reset touchpad settings"
+  atomic_write "$SETTINGS_FILE" "$settings" || die_json "unable to save reset touchpad settings"
+  write_session_mode normal || die_json "unable to save reset mode"
+  resolve_status_data "$devices" || die_json "unable to read reset touchpad state"
+}
+
+case ${1:-status} in
+  status) [[ $# -eq 1 ]] || die_json "status takes no arguments"; command_status ;;
+  initialize) [[ $# -eq 1 ]] || die_json "initialize takes no arguments"; command_initialize ;;
+  reapply) [[ $# -eq 1 ]] || die_json "reapply takes no arguments"; command_initialize ;;
+  cycle) [[ $# -eq 1 ]] || die_json "cycle takes no arguments"; command_cycle ;;
+  mode) shift; command_mode "$@" ;;
+  set) shift; command_set "$@" ;;
+  reset) [[ $# -eq 1 ]] || die_json "reset takes no arguments"; command_reset ;;
+  *) die_json "unknown command" ;;
+esac

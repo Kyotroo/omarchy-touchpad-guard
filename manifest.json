@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "kdm.touchpad-guard",
+  "name": "Touchpad Guard",
+  "version": "1.0.0",
+  "author": "Kyotroo",
+  "license": "MIT",
+  "homepage": "https://github.com/Kyotroo/omarchy-touchpad-guard",
+  "description": "Mode-first touchpad protection that stops accidental taps while keeping scrolling available.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "TouchpadGuard.qml"
+  },
+  "barWidget": {
+    "displayName": "Touchpad Guard",
+    "description": "Cycle Normal, Typing Safe, and Off from a persistent bar widget.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

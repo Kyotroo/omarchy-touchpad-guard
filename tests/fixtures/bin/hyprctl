@@ -1,0 +1,55 @@
+#!/bin/bash
+set -euo pipefail
+
+default_devices='{"mice":[{"address":"0x1","name":"test-touchpad","defaultSpeed":0.0,"scrollFactor":-1.0}],"keyboards":[],"touch":[],"switches":[],"tablets":[]}'
+
+if [[ ${FAKE_HYPR_FAIL:-} == "all" ]]; then
+  echo "hyprctl unavailable" >&2
+  exit 1
+fi
+
+if [[ ${1:-} == "-j" && ${2:-} == "devices" ]]; then
+  [[ ${FAKE_HYPR_FAIL:-} != "devices" ]] || exit 1
+  printf '%s\n' "${FAKE_HYPR_DEVICES_JSON:-$default_devices}"
+  exit 0
+fi
+
+if [[ ${1:-} == "-j" && ${2:-} == "getoption" ]]; then
+  [[ ${FAKE_HYPR_FAIL:-} != "getoption" ]] || exit 1
+  case "${3:-}" in
+    input:touchpad:natural_scroll) value=${FAKE_NATURAL_SCROLL:-false}; printf '{"option":"%s","bool":%s,"set":true}\n' "$3" "$value" ;;
+    input:touchpad:scroll_factor) value=${FAKE_SCROLL_FACTOR:-0.4}; printf '{"option":"%s","float":%s,"set":true}\n' "$3" "$value" ;;
+    input:touchpad:tap-to-click) value=${FAKE_TAP_TO_CLICK:-true}; printf '{"option":"%s","bool":%s,"set":true}\n' "$3" "$value" ;;
+    input:touchpad:tap-and-drag) value=${FAKE_TAP_AND_DRAG:-true}; printf '{"option":"%s","bool":%s,"set":true}\n' "$3" "$value" ;;
+    input:touchpad:clickfinger_behavior) value=${FAKE_CLICKFINGER:-true}; printf '{"option":"%s","bool":%s,"set":true}\n' "$3" "$value" ;;
+    input:touchpad:tap_button_map) value=${FAKE_TAP_BUTTON_MAP:-lrm}; printf '{"option":"%s","str":"%s","set":true}\n' "$3" "$value" ;;
+    input:touchpad:middle_button_emulation) value=${FAKE_MIDDLE_EMULATION:-false}; printf '{"option":"%s","bool":%s,"set":true}\n' "$3" "$value" ;;
+    input:touchpad:drag_lock) value=${FAKE_DRAG_LOCK:-0}; printf '{"option":"%s","int":%s,"set":true}\n' "$3" "$value" ;;
+    input:touchpad:drag_3fg) value=${FAKE_DRAG_3FG:-0}; printf '{"option":"%s","int":%s,"set":true}\n' "$3" "$value" ;;
+    input:touchpad:disable_while_typing) value=${FAKE_DISABLE_WHILE_TYPING:-true}; printf '{"option":"%s","bool":%s,"set":true}\n' "$3" "$value" ;;
+    input:follow_mouse) value=${FAKE_FOLLOW_MOUSE:-1}; printf '{"option":"%s","int":%s,"set":true}\n' "$3" "$value" ;;
+    *) echo "no such option" >&2; exit 1 ;;
+  esac
+  exit 0
+fi
+
+if [[ ${1:-} == "eval" ]]; then
+  [[ ${FAKE_HYPR_FAIL:-} != "eval" ]] || exit 1
+  if [[ -n ${FAKE_HYPR_FAIL_EVAL_MATCH:-} && ${2:-} == *"$FAKE_HYPR_FAIL_EVAL_MATCH"* ]]; then
+    exit 1
+  fi
+  if [[ -n ${FAKE_HYPR_DELAY:-} ]]; then
+    sleep "$FAKE_HYPR_DELAY"
+  fi
+  printf '%s\n' "${2:-}" >>"${FAKE_HYPR_LOG:?}"
+  exit 0
+fi
+
+if [[ ${1:-} == "reload" ]]; then
+  [[ ${FAKE_HYPR_FAIL:-} != "reload" ]] || exit 1
+  printf 'reload\n' >>"${FAKE_HYPR_LOG:?}"
+  exit 0
+fi
+
+echo "unexpected hyprctl arguments: $*" >&2
+exit 2

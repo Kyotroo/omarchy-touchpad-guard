@@ -1,0 +1,13 @@
+#!/bin/bash
+set -euo pipefail
+printf '%s\n' "${1:-toggle}" >>"${FAKE_TOGGLE_LOG:?}"
+[[ ${FAKE_TOGGLE_FAIL:-0} == 0 ]] || exit 1
+
+marker=${TOUCHPAD_GUARD_TOGGLE_MARKER:-}
+if [[ -n $marker ]]; then
+  mkdir -p -- "$(dirname -- "$marker")"
+  case ${1:-toggle} in
+    off) printf 'test-touchpad\n' >"$marker" ;;
+    on) rm -f -- "$marker" ;;
+  esac
+fi
