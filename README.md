@@ -33,7 +33,11 @@ Add this to `~/.config/hypr/bindings.lua`:
 
 ```lua
 o.bind("SUPER + SHIFT + T", "Cycle touchpad guard", "omarchy-shell kdm.touchpad-guard cycle")
+o.bind("SUPER + CTRL + SHIFT + T", "Touchpad guard settings", "omarchy-shell kdm.touchpad-guard toggle")
 ```
+
+Add both. The second one matters more than it looks: the touchpad is the thing
+this plugin turns off, so the panel needs a way in that does not depend on it.
 
 Then reload Hyprland:
 
@@ -45,10 +49,17 @@ If that key is already bound to `omarchy toggle touchpad`, replace that one bind
 
 ## Use
 
-- **Left-click** the bar icon to cycle Normal → Typing Safe → Off → Normal.
-- **Right-click** to open the mode and settings panel.
+- **Click** the bar icon to open the mode and settings panel. Left and right
+  both open it.
 - **Middle-click** to refresh detected hardware and state.
-- Press **Super + Shift + T** to cycle without using the touchpad.
+- Press **Super + Shift + T** to cycle Normal → Typing Safe → Off → Normal.
+- Press **Super + Ctrl + Shift + T** to open the panel without the touchpad.
+
+Clicking the icon never changes the mode. On a clickpad the hardware reports a
+single button and libinput decides what a press means, so a press meant as a
+right-click can arrive as a left-click. If that click cycled the mode, a misread
+press could reach Off — switching off the touchpad you were trying to click
+with. Mode changes are deliberate: the panel's mode row, the shortcut, or IPC.
 
 The icon and tooltip always identify Normal, Typing Safe, Off, unavailable hardware, or an error. Successful mode changes also produce an Omarchy OSD.
 
@@ -93,6 +104,25 @@ Touchpad Guard never edits `~/.config/hypr/input.lua` or files under `/usr/share
 
 Every new Hyprland login starts in Normal. Restarting only the Omarchy shell during the same login retains the selected mode. A Hyprland configuration reload silently reapplies that mode, and device changes are reconciled automatically.
 
+Reconciliation is event-driven. Touchpad Guard reapplies the active profile when
+Hyprland reloads its config or a pointer device appears or disappears — not on a
+repeating timer. It polls its own status once a minute so the icon stays honest,
+but that poll is read-only. This is worth knowing if you experiment by hand: a
+value you set yourself now survives until the next reload, rather than being
+overwritten seconds later. Omarchy's Lua config rejects `hyprctl keyword`, so
+experiment with `eval`:
+
+```bash
+hyprctl eval 'hl.config({ input = { touchpad = { clickfinger_behavior = false } } })'
+```
+
+That lasts until the next config reload. To make a change Touchpad Guard keeps,
+set it through the plugin instead:
+
+```bash
+omarchy-shell kdm.touchpad-guard set clickfingerBehavior false
+```
+
 Touchpads and trackpads are detected from Hyprland's pointer list by their device names, following Omarchy's existing hardware-detection convention. Multiple matching devices receive the same mode and preferences.
 
 **Reset to current Omarchy config** reloads Hyprland, imports the resulting touchpad values, replaces the saved Normal profile, and returns to Normal.
@@ -114,6 +144,40 @@ omarchy-shell kdm.touchpad-guard reset
 The controller can also be called directly from the installed plugin directory. Its machine-readable commands return a versioned JSON object.
 
 ## Recovery and troubleshooting
+
+### Right-click acts like a left-click
+
+This is usually the click method, not a fault. Most laptop touchpads are
+clickpads: the hardware has one button and reports every press as `BTN_LEFT`,
+so libinput synthesises the right button. Check which way it does that:
+
+```bash
+hyprctl getoption input:touchpad:clickfinger_behavior
+```
+
+Omarchy's default is `true`. With clickfinger on, right-click is a **two-finger
+press**, and the bottom-right corner is not a right-click zone — a one-finger
+press there is a left-click, by design. Two-finger **tap** also right-clicks
+while tap-to-click is on, which Typing Safe deliberately turns off.
+
+To use the bottom-right corner instead, switch to button areas through the
+plugin so the setting is saved in your Normal profile:
+
+```bash
+omarchy-shell kdm.touchpad-guard set clickfingerBehavior false
+```
+
+Confirm what the kernel exposes if you want to be certain the pad has no real
+right button:
+
+```bash
+grep -A6 'Touchpad' /proc/bus/input/devices
+```
+
+`PROP=5` includes `INPUT_PROP_BUTTONPAD`, and a `KEY=` bitmap with bit 272 but
+not 273 means `BTN_LEFT` with no `BTN_RIGHT`.
+
+### Other recovery
 
 If the touchpad is Off and the widget or shell is unavailable, re-enable it from the keyboard:
 
