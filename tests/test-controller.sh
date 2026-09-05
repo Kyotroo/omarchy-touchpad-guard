@@ -31,7 +31,7 @@ setup_case() {
   : >"$FAKE_HYPR_LOG"
   : >"$FAKE_TOGGLE_LOG"
   : >"$FAKE_OSD_LOG"
-  unset FAKE_HYPR_FAIL FAKE_HYPR_DEVICES_JSON FAKE_HYPR_FAIL_EVAL_MATCH FAKE_HYPR_DELAY FAKE_TOGGLE_FAIL
+  unset FAKE_HYPR_FAIL FAKE_HYPR_DEVICES_JSON FAKE_HYPR_FAIL_EVAL_MATCH FAKE_HYPR_DELAY FAKE_TOGGLE_FAIL FAKE_SENSITIVITY
 }
 
 teardown_case() {
@@ -63,6 +63,19 @@ test_initialize_persists_imported_settings() {
   $CONTROLLER initialize >/dev/null || return 1
   jq -e '.schemaVersion == 1 and .mode == "normal" and .hyprlandSignature == "session-a"' "$TOUCHPAD_GUARD_STATE_DIR/session.json" >/dev/null || return 1
   jq -e '.schemaVersion == 1 and .normal.tapToClick == true and .normal.scrollFactor == 0.4 and .protectKeyboardFocus == true' "$TOUCHPAD_GUARD_STATE_DIR/settings.json" >/dev/null
+}
+
+test_sensitivity_is_imported_from_the_configured_option() {
+  # `defaultSpeed` is libinput's default for the hardware and is deliberately
+  # set to disagree with the configured speed here. The profile must follow
+  # `input:sensitivity`, and the applied device state must follow the profile.
+  export FAKE_SENSITIVITY=0.35
+  export FAKE_HYPR_DEVICES_JSON='{"mice":[{"address":"0x1","name":"test-touchpad","defaultSpeed":-0.5,"scrollFactor":1.0}],"keyboards":[],"touch":[],"switches":[],"tablets":[]}'
+
+  $CONTROLLER initialize >/dev/null || return 1
+  jq -e '.normal.sensitivity == 0.35' "$TOUCHPAD_GUARD_STATE_DIR/settings.json" >/dev/null || return 1
+  grep -F 'sensitivity = 0.35' "$FAKE_HYPR_LOG" >/dev/null || return 1
+  ! grep -F 'sensitivity = -0.5' "$FAKE_HYPR_LOG" >/dev/null
 }
 
 test_no_device_is_supported() {
@@ -313,6 +326,7 @@ test_reapply_keeps_mode_without_osd() {
 if [[ $group == all || $group == state ]]; then
   run_test "status reports imported defaults" test_status_reports_imported_defaults
   run_test "initialize persists imported settings" test_initialize_persists_imported_settings
+  run_test "sensitivity is imported from the configured option" test_sensitivity_is_imported_from_the_configured_option
   run_test "no touchpad is a supported status" test_no_device_is_supported
   run_test "multiple touchpads are retained" test_multiple_devices_are_retained
   run_test "hostile device names remain escaped data" test_hostile_device_names_remain_data
