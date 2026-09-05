@@ -97,7 +97,7 @@ touchpads_from_devices() {
     | select((.name | length) <= 512)
     | select(.name | test("[[:cntrl:]]") | not)
     | select(.name | test("touchpad|trackpad"; "i"))
-    | {name:.name,sensitivity:(.defaultSpeed // 0)}]' <<<"$devices"
+    | {name:.name}]' <<<"$devices"
 }
 
 option_value() {
@@ -113,12 +113,15 @@ option_value() {
 }
 
 import_settings() {
-  local devices=$1 touchpads sensitivity
+  local sensitivity
   local natural_scroll scroll_factor tap_to_click tap_and_drag clickfinger
   local tap_map middle drag_lock drag_3fg disable_typing follow_mouse
 
-  touchpads=$(touchpads_from_devices "$devices") || return 1
-  sensitivity=$(jq -r '.[0].sensitivity // 0' <<<"$touchpads")
+  # Read the configured pointer speed, not the device's `defaultSpeed`. That
+  # field is libinput's built-in default for the hardware and never reflects
+  # `input:sensitivity`, so importing it silently reset any non-zero speed the
+  # user had configured - and the imported value is applied, not just stored.
+  sensitivity=$(option_value input:sensitivity float 0)
   sensitivity=$(coerce_setting sensitivity "$sensitivity") || sensitivity=0
   natural_scroll=$(option_value input:touchpad:natural_scroll bool false)
   scroll_factor=$(option_value input:touchpad:scroll_factor float 1)
@@ -264,7 +267,7 @@ load_current_state() {
 resolve_status_data() {
   local devices=$1 settings session mode=normal touchpads warnings='[]' effective
   if ! settings=$(read_safe_json "$SETTINGS_FILE" "$settings_filter"); then
-    settings=$(import_settings "$devices") || return 1
+    settings=$(import_settings) || return 1
   fi
   if session=$(read_safe_json "$SESSION_FILE" "$session_filter") &&
       [[ $(jq -r '.hyprlandSignature' <<<"$session") == "$SESSION_SIGNATURE" ]]; then
@@ -301,7 +304,7 @@ command_initialize() {
 
   if ! settings=$(read_safe_json "$SETTINGS_FILE" "$settings_filter"); then
     quarantine_if_present "$SETTINGS_FILE"
-    settings=$(import_settings "$devices") || die_json "unable to import touchpad settings"
+    settings=$(import_settings) || die_json "unable to import touchpad settings"
     atomic_write "$SETTINGS_FILE" "$settings" || die_json "unable to save touchpad settings"
   fi
 
@@ -420,7 +423,7 @@ command_reset() {
   hyprctl reload >/dev/null || die_json "unable to reload Hyprland"
   local devices settings
   devices=$(read_devices_json) || die_json "unable to read Hyprland devices after reload"
-  settings=$(import_settings "$devices") || die_json "unable to import reloaded touchpad settings"
+  settings=$(import_settings) || die_json "unable to import reloaded touchpad settings"
   apply_mode normal "$settings" "$devices" normal false || die_json "unable to apply reset touchpad settings"
   atomic_write "$SETTINGS_FILE" "$settings" || die_json "unable to save reset touchpad settings"
   write_session_mode normal || die_json "unable to save reset mode"

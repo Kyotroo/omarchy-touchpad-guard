@@ -17,6 +17,7 @@ fi
 if [[ ${1:-} == "-j" && ${2:-} == "getoption" ]]; then
   [[ ${FAKE_HYPR_FAIL:-} != "getoption" ]] || exit 1
   case "${3:-}" in
+    input:sensitivity) value=${FAKE_SENSITIVITY:-0}; printf '{"option":"%s","float":%s,"set":true}\n' "$3" "$value" ;;
     input:touchpad:natural_scroll) value=${FAKE_NATURAL_SCROLL:-false}; printf '{"option":"%s","bool":%s,"set":true}\n' "$3" "$value" ;;
     input:touchpad:scroll_factor) value=${FAKE_SCROLL_FACTOR:-0.4}; printf '{"option":"%s","float":%s,"set":true}\n' "$3" "$value" ;;
     input:touchpad:tap-to-click) value=${FAKE_TAP_TO_CLICK:-true}; printf '{"option":"%s","bool":%s,"set":true}\n' "$3" "$value" ;;
