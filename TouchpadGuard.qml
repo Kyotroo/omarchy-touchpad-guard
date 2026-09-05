@@ -151,11 +151,16 @@ BarWidget {
     onTriggered: root.reapply()
   }
 
+  // Reconciliation is event-driven: the connections above already cover the
+  // cases that can drift (a config reload, a device appearing or leaving).
+  // This poll is read-only - `status` issues no `hyprctl eval` and writes no
+  // state - so it keeps the icon and tooltip honest if something outside the
+  // plugin changes the touchpad, without reasserting the profile on a loop.
   Timer {
-    interval: 7500
+    interval: 60000
     running: true
     repeat: true
-    onTriggered: root.reapply()
+    onTriggered: root.refresh()
   }
 
   Loader {
@@ -222,10 +227,16 @@ BarWidget {
     useActiveColor: true
     tooltipText: Model.modeTooltip(root.guardStatus)
 
+    // No mouse button changes the mode. A clickpad reports only BTN_LEFT, so
+    // libinput synthesises right-click from a two-finger press; a press it
+    // reads as one finger arrives here as a left-click. When left-click
+    // cycled, those misreads walked the mode into Typing Safe (which turns
+    // off the tap gesture) and then Off (which turns off the touchpad),
+    // removing the only way back into this panel. Cycling now lives on the
+    // keyboard shortcut and on the panel's own mode row.
     onPressed: function(mouseButton) {
-      if (mouseButton === Qt.RightButton) root.togglePanel()
-      else if (mouseButton === Qt.MiddleButton) root.refresh()
-      else root.cycle()
+      if (mouseButton === Qt.MiddleButton) root.refresh()
+      else root.togglePanel()
     }
   }
 }

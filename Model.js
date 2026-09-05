@@ -32,7 +32,7 @@ function modeTooltip(status) {
   if (!Array.isArray(status.devices) || status.devices.length === 0)
     return "Touchpad Guard: No touchpad detected"
   return "Touchpad Guard: " + modeLabel(status.mode)
-    + " — left-click to cycle, right-click for settings"
+    + " — click for settings, Super + Shift + T to cycle"
 }
 
 function settingEnabled(mode, key) {

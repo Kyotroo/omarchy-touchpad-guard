@@ -11,7 +11,7 @@ jq -e '
   .schemaVersion == 1
   and .id == "kdm.touchpad-guard"
   and .name == "Touchpad Guard"
-  and .version == "1.0.0"
+  and .version == "1.1.0"
   and .author == "Kyotroo"
   and .license == "MIT"
   and .homepage == "https://github.com/Kyotroo/omarchy-touchpad-guard"
@@ -62,9 +62,27 @@ if ! grep -A3 'name.indexOf("deviceadded")' TouchpadGuard.qml \
   exit 1
 fi
 
-if ! grep -A4 'interval: 7500' TouchpadGuard.qml \
-    | grep -F 'onTriggered: root.reapply()' >/dev/null; then
-  echo "the health timer must silently reconcile the active mode" >&2
+if ! grep -A4 'interval: 60000' TouchpadGuard.qml \
+    | grep -F 'onTriggered: root.refresh()' >/dev/null; then
+  echo "the health timer must poll status read-only" >&2
+  exit 1
+fi
+
+if grep -B6 'onTriggered: root.reapply()' TouchpadGuard.qml \
+    | grep -F 'repeat: true' >/dev/null; then
+  echo "the active mode must not be reapplied on a blind repeating timer" >&2
+  exit 1
+fi
+
+if grep -A6 'onPressed: function(mouseButton)' TouchpadGuard.qml \
+    | grep -F 'root.cycle()' >/dev/null; then
+  echo "mouse buttons must not change the touchpad mode" >&2
+  exit 1
+fi
+
+if ! grep -A6 'onPressed: function(mouseButton)' TouchpadGuard.qml \
+    | grep -F 'root.togglePanel()' >/dev/null; then
+  echo "the panel must stay reachable from an ordinary left-click" >&2
   exit 1
 fi
 
